@@ -2,5 +2,7 @@ services:
   - type: web
     name: html-api
     env: python
-    buildCommand: pip install -r requirements.txt && playwright install --with-deps chromium
+    buildCommand: |
+      pip install -r requirements.txt
+      python -m playwright install --with-deps chromium
     startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
