@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+playwright
+beautifulsoup4
+bs4
+python-dotenv
