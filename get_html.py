@@ -1,7 +1,9 @@
-from fastapi import APIRouter, Form, Header, Depends, HTTPException
+from fastapi import APIRouter, Header, Depends, HTTPException
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from pydantic import BaseModel
+from typing import Optional
 import os
 
 router = APIRouter()
@@ -25,6 +27,16 @@ def verify_api_key(x_api_key: str = Header(None)):
 
 
 # -------------------------------
+# REQUEST MODEL (JSON)
+# -------------------------------
+class GetHtmlRequest(BaseModel):
+    url_target: str
+    url_login: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+
+
+# -------------------------------
 # SAFE NORMALIZATION
 # -------------------------------
 def safe_lower(value):
@@ -34,14 +46,11 @@ def safe_lower(value):
 
 
 # -------------------------------
-# MAIN ENDPOINT
+# MAIN ENDPOINT (JSON)
 # -------------------------------
 @router.post("/get-html")
 def get_html_with_optional_login(
-    url_target: str = Form(...),
-    url_login: str = Form(None),
-    username: str = Form(None),
-    password: str = Form(None),
+    data: GetHtmlRequest,
     _: None = Depends(verify_api_key)
 ):
     try:
@@ -50,11 +59,11 @@ def get_html_with_optional_login(
             page = browser.new_page()
 
             # =========================
-            # 🔵 LOGIN (opcional)
+            # 🔵 LOGIN (se credenciais enviadas)
             # =========================
-            if url_login and username and password:
+            if data.username and data.password:
 
-                page.goto(url_login)
+                page.goto(data.url_login or data.url_target)
                 page.wait_for_load_state("networkidle")
 
                 # USERNAME
@@ -65,7 +74,7 @@ def get_html_with_optional_login(
                 if user_input.count() == 0:
                     raise Exception("Username field not found")
 
-                user_input.fill(username)
+                user_input.fill(data.username)
 
                 # PASSWORD
                 pass_input = page.locator('input[type="password"]').first
@@ -73,7 +82,7 @@ def get_html_with_optional_login(
                 if pass_input.count() == 0:
                     raise Exception("Password field not found")
 
-                pass_input.fill(password)
+                pass_input.fill(data.password)
 
                 # LOGIN BUTTON
                 login_btn = page.locator(
@@ -94,12 +103,11 @@ def get_html_with_optional_login(
             # =========================
             # 🔴 TARGET PAGE
             # =========================
-            page.goto(url_target)
+            page.goto(data.url_target)
             page.wait_for_load_state("networkidle")
 
             url = safe_lower(page.url)
             title = safe_lower(page.title)
-
             html = page.content()
 
             # ❌ TARGET REQUIRES LOGIN
