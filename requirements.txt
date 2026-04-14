@@ -4,3 +4,4 @@ playwright
 beautifulsoup4
 bs4
 python-dotenv
+python-multipart
