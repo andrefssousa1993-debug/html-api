@@ -7,9 +7,6 @@ import os
 
 router = APIRouter()
 
-# -------------------------------
-# LOAD API KEY
-# -------------------------------
 load_dotenv()
 API_KEY = os.getenv("API_KEY")
 
@@ -23,9 +20,8 @@ def verify_api_key(x_api_key: str = Header(None)):
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
 
-
 # -------------------------------
-# REQUEST MODEL (JSON)
+# REQUEST MODEL
 # -------------------------------
 class RequestData(BaseModel):
     url_target: str
@@ -33,26 +29,56 @@ class RequestData(BaseModel):
     username: str | None = None
     password: str | None = None
 
+# -------------------------------
+# FIND INPUT
+# -------------------------------
+def find_input(page):
+    selectors = [
+        'input[type="email"]',
+        'input[type="text"]',
+        'input[name*="user"]',
+        'input[name*="email"]',
+        'input[id*="user"]',
+        'input[id*="email"]',
+        'input[placeholder*="user"]',
+        'input[placeholder*="email"]'
+    ]
 
-# -------------------------------
-# SMART FIND INPUT
-# -------------------------------
-def find_input(page, keywords):
-    for keyword in keywords:
-        locator = page.locator(f'input[name*="{keyword}"], input[id*="{keyword}"]').first
-        if locator.count() > 0:
+    for sel in selectors:
+        locator = page.locator(sel).first
+        if locator.count() > 0 and locator.is_visible():
             return locator
-
-    # fallback genérico
-    locator = page.locator("input[type='text'], input[type='email']").first
-    if locator.count() > 0:
-        return locator
 
     return None
 
+# -------------------------------
+# FIND LOGIN BUTTON (FORTE)
+# -------------------------------
+def find_login_button(page):
+    possible_names = ["login", "log in", "entrar", "sign in", "submit"]
+
+    # tentativa 1 (melhor)
+    for name in possible_names:
+        btn = page.get_by_role("button", name=name, exact=False)
+        if btn.count() > 0:
+            return btn.first
+
+    # tentativa 2
+    buttons = page.locator("button")
+    for i in range(buttons.count()):
+        text = buttons.nth(i).inner_text().lower()
+        if any(word in text for word in ["log", "entrar", "sign"]):
+            return buttons.nth(i)
+
+    # tentativa 3
+    submit = page.locator('input[type="submit"], button[type="submit"]').first
+    if submit.count() > 0:
+        return submit
+
+    return None
 
 # -------------------------------
-# MAIN ENDPOINT
+# MAIN
 # -------------------------------
 @router.post("/get-html")
 def get_html(data: RequestData, _: None = Depends(verify_api_key)):
@@ -63,65 +89,59 @@ def get_html(data: RequestData, _: None = Depends(verify_api_key)):
             page = browser.new_page()
 
             # =========================
-            # 🔵 LOGIN (se enviado)
+            # LOGIN
             # =========================
             if data.url_login and data.username and data.password:
 
                 page.goto(data.url_login)
                 page.wait_for_load_state("networkidle")
+                page.wait_for_timeout(1500)
 
-                # encontrar campos automaticamente
-                user_input = find_input(page, ["user", "email", "login"])
+                user_input = find_input(page)
                 pass_input = page.locator("input[type='password']").first
 
                 if not user_input:
-                    raise Exception("Username field not found")
+                    return {"status": "fail", "response": "Username field not found"}
 
                 if pass_input.count() == 0:
-                    raise Exception("Password field not found")
+                    return {"status": "fail", "response": "Password field not found"}
 
                 user_input.fill(data.username)
                 pass_input.fill(data.password)
 
-                # botão login
-                login_btn = page.locator(
-                    "button[type='submit'], input[type='submit']"
-                ).first
+                login_btn = find_login_button(page)
 
-                if login_btn.count() > 0:
+                if login_btn:
                     login_btn.click()
                 else:
                     pass_input.press("Enter")
 
-                # esperar
-                page.wait_for_load_state("networkidle")
-                page.wait_for_timeout(2000)
+                # esperar mudança real
+                try:
+                    page.wait_for_function(
+                        f"window.location.href !== '{data.url_login}'",
+                        timeout=5000
+                    )
+                except:
+                    pass
 
-                # validação mais robusta
+                page.wait_for_load_state("networkidle")
+                page.wait_for_timeout(1500)
+
+                # validação robusta
                 if "login" in page.url.lower():
-                    raise HTTPException(status_code=403, detail="Login failed")
+                    return {"status": "fail", "response": "Login failed"}
 
             # =========================
-            # 🔴 TARGET PAGE
+            # TARGET
             # =========================
             page.goto(data.url_target)
             page.wait_for_load_state("networkidle")
 
             html = page.content()
 
-            # detectar login obrigatório
             if "login" in page.url.lower():
-                raise HTTPException(
-                    status_code=403,
-                    detail="Target requires login"
-                )
-
-            # detectar permissões
-            if any(word in page.title().lower() for word in ["forbidden", "denied"]):
-                raise HTTPException(
-                    status_code=403,
-                    detail="Invalid permissions"
-                )
+                return {"status": "fail", "response": "Target requires login"}
 
             soup = BeautifulSoup(html, "html.parser")
             body = soup.body
@@ -130,17 +150,11 @@ def get_html(data: RequestData, _: None = Depends(verify_api_key)):
 
             return {
                 "status": "success",
-                "body": str(body) if body else ""
+                "response": str(body) if body else ""
             }
-
-    except HTTPException as he:
-        return {
-        "status": "fail",
-        "response": he.detail
-    }
 
     except Exception as e:
         return {
-        "status": "fail",
-        "response": str(e)
-    }
+            "status": "fail",
+            "response": str(e)
+        }
