@@ -68,7 +68,7 @@ def get_html_with_optional_login(
 
                 # USERNAME
                 user_input = page.locator(
-                    'input[type="email"], input[type="text"], input[name*="user"], input[name*="email"]'
+                'input#username, input[name="username"], input[type="text"]'
                 ).first
 
                 if user_input.count() == 0:
@@ -77,7 +77,9 @@ def get_html_with_optional_login(
                 user_input.fill(data.username)
 
                 # PASSWORD
-                pass_input = page.locator('input[type="password"]').first
+                pass_input = page.locator(
+                'input#password, input[type="password"]'
+                ).first
 
                 if pass_input.count() == 0:
                     raise Exception("Password field not found")
