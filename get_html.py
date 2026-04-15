@@ -52,25 +52,22 @@ def find_input(page):
     return None
 
 # -------------------------------
-# FIND LOGIN BUTTON (FORTE)
+# FIND LOGIN BUTTON
 # -------------------------------
 def find_login_button(page):
     possible_names = ["login", "log in", "entrar", "sign in", "submit"]
 
-    # tentativa 1 (melhor)
     for name in possible_names:
         btn = page.get_by_role("button", name=name, exact=False)
         if btn.count() > 0:
             return btn.first
 
-    # tentativa 2
     buttons = page.locator("button")
     for i in range(buttons.count()):
         text = buttons.nth(i).inner_text().lower()
         if any(word in text for word in ["log", "entrar", "sign"]):
             return buttons.nth(i)
 
-    # tentativa 3
     submit = page.locator('input[type="submit"], button[type="submit"]').first
     if submit.count() > 0:
         return submit
@@ -116,19 +113,20 @@ def get_html(data: RequestData, _: None = Depends(verify_api_key)):
                 else:
                     pass_input.press("Enter")
 
-                # esperar mudança real
+                # 🔥 esperar redirect real
                 try:
                     page.wait_for_function(
                         f"window.location.href !== '{data.url_login}'",
-                        timeout=5000
+                        timeout=7000
                     )
                 except:
                     pass
 
                 page.wait_for_load_state("networkidle")
-                page.wait_for_timeout(1500)
+                page.wait_for_timeout(2000)
 
-                # validação robusta
+                print("URL depois do login:", page.url)
+
                 if "login" in page.url.lower():
                     return {"status": "fail", "response": "Login failed"}
 
@@ -137,7 +135,24 @@ def get_html(data: RequestData, _: None = Depends(verify_api_key)):
             # =========================
             page.goto(data.url_target)
             page.wait_for_load_state("networkidle")
+            page.wait_for_timeout(2000)
 
+            print("URL depois do target:", page.url)
+
+            # fallback (SPA / OutSystems)
+            if "login" in page.url.lower():
+                print("Fallback: tentar navegação interna")
+
+                try:
+                    page.get_by_role("link", name="Games").click()
+                    page.wait_for_load_state("networkidle")
+                    page.wait_for_timeout(1500)
+                except:
+                    pass
+
+            # =========================
+            # RESULT
+            # =========================
             html = page.content()
 
             if "login" in page.url.lower():
