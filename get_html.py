@@ -1,9 +1,8 @@
 from fastapi import APIRouter, Header, Depends, HTTPException
+from pydantic import BaseModel
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from pydantic import BaseModel
-from typing import Optional
 import os
 
 router = APIRouter()
@@ -14,9 +13,8 @@ router = APIRouter()
 load_dotenv()
 API_KEY = os.getenv("API_KEY")
 
-
 # -------------------------------
-# AUTH MIDDLEWARE
+# AUTH
 # -------------------------------
 def verify_api_key(x_api_key: str = Header(None)):
     if not API_KEY:
@@ -29,66 +27,65 @@ def verify_api_key(x_api_key: str = Header(None)):
 # -------------------------------
 # REQUEST MODEL (JSON)
 # -------------------------------
-class GetHtmlRequest(BaseModel):
+class RequestData(BaseModel):
     url_target: str
-    url_login: Optional[str] = None
-    username: Optional[str] = None
-    password: Optional[str] = None
+    url_login: str | None = None
+    username: str | None = None
+    password: str | None = None
 
 
 # -------------------------------
-# SAFE NORMALIZATION
+# SMART FIND INPUT
 # -------------------------------
-def safe_lower(value):
-    if callable(value):
-        value = value()
-    return str(value).lower() if value is not None else ""
+def find_input(page, keywords):
+    for keyword in keywords:
+        locator = page.locator(f'input[name*="{keyword}"], input[id*="{keyword}"]').first
+        if locator.count() > 0:
+            return locator
+
+    # fallback genérico
+    locator = page.locator("input[type='text'], input[type='email']").first
+    if locator.count() > 0:
+        return locator
+
+    return None
 
 
 # -------------------------------
-# MAIN ENDPOINT (JSON)
+# MAIN ENDPOINT
 # -------------------------------
 @router.post("/get-html")
-def get_html_with_optional_login(
-    data: GetHtmlRequest,
-    _: None = Depends(verify_api_key)
-):
+def get_html(data: RequestData, _: None = Depends(verify_api_key)):
+
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
 
             # =========================
-            # 🔵 LOGIN (se credenciais enviadas)
+            # 🔵 LOGIN (se enviado)
             # =========================
-            if data.username and data.password:
+            if data.url_login and data.username and data.password:
 
-                page.goto(data.url_login or data.url_target)
+                page.goto(data.url_login)
                 page.wait_for_load_state("networkidle")
 
-                # USERNAME
-                user_input = page.locator(
-                'input#username, input[name="username"], input[type="text"]'
-                ).first
+                # encontrar campos automaticamente
+                user_input = find_input(page, ["user", "email", "login"])
+                pass_input = page.locator("input[type='password']").first
 
-                if user_input.count() == 0:
+                if not user_input:
                     raise Exception("Username field not found")
-
-                user_input.fill(data.username)
-
-                # PASSWORD
-                pass_input = page.locator(
-                'input#password, input[type="password"]'
-                ).first
 
                 if pass_input.count() == 0:
                     raise Exception("Password field not found")
 
+                user_input.fill(data.username)
                 pass_input.fill(data.password)
 
-                # LOGIN BUTTON
+                # botão login
                 login_btn = page.locator(
-                    'button[type="submit"], input[type="submit"]'
+                    "button[type='submit'], input[type='submit']"
                 ).first
 
                 if login_btn.count() > 0:
@@ -96,10 +93,12 @@ def get_html_with_optional_login(
                 else:
                     pass_input.press("Enter")
 
+                # esperar
                 page.wait_for_load_state("networkidle")
+                page.wait_for_timeout(2000)
 
-                # ❌ LOGIN FAILED
-                if "login" in safe_lower(page.url) or "login" in safe_lower(page.title):
+                # validação mais robusta
+                if "login" in page.url.lower():
                     raise HTTPException(status_code=403, detail="Login failed")
 
             # =========================
@@ -108,23 +107,17 @@ def get_html_with_optional_login(
             page.goto(data.url_target)
             page.wait_for_load_state("networkidle")
 
-            url = safe_lower(page.url)
-            title = safe_lower(page.title)
             html = page.content()
 
-            # ❌ TARGET REQUIRES LOGIN
-            if "login" in url or "login" in title:
+            # detectar login obrigatório
+            if "login" in page.url.lower():
                 raise HTTPException(
                     status_code=403,
                     detail="Target requires login"
                 )
 
-            # ❌ INVALID PERMISSIONS
-            if (
-                "forbidden" in url or
-                "access denied" in title or
-                "permission" in title
-            ):
+            # detectar permissões
+            if any(word in page.title().lower() for word in ["forbidden", "denied"]):
                 raise HTTPException(
                     status_code=403,
                     detail="Invalid permissions"
@@ -141,10 +134,13 @@ def get_html_with_optional_login(
             }
 
     except HTTPException as he:
-        raise he
+        return {
+        "status": "fail",
+        "response": he.detail
+    }
 
     except Exception as e:
         return {
-            "status": "fail",
-            "error": str(e)
-        }
+        "status": "fail",
+        "response": str(e)
+    }
