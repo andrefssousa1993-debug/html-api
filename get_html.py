@@ -84,7 +84,6 @@ def get_html(data: RequestData, _: None = Depends(verify_api_key)):
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
-            page.route("**/*.{png,jpg,jpeg,gif,css,woff,woff2,svg,pdf}", lambda route: route.abort())
 
             # =========================
             # LOGIN
