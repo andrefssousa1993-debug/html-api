@@ -139,6 +139,30 @@ def get_html(data: RequestData, _: None = Depends(verify_api_key)):
 
             print("URL depois do target:", page.url)
 
+            # --- INJEÇÃO DE METADADOS (Segura e sem quebras) ---
+            try:
+                page.evaluate("""() => {
+                    document.querySelectorAll('input').forEach(input => {
+                        // 1. Detetar Máscaras (Inputmask.js / OutSystems)
+                        if (input.inputmask && input.inputmask.opts) {
+                            const mask = input.inputmask.opts.mask;
+                            if (mask) input.setAttribute('data-oti-mask', mask.toString());
+                        }
+
+                        // 2. Detetar tipos reais (Hierarchy Check)
+                        const parentSpan = input.closest('span');
+                        if (parentSpan) {
+                            if (parentSpan.classList.contains('input-date')) {
+                                input.setAttribute('data-oti-type', 'date');
+                            } else if (parentSpan.classList.contains('input-number') || parentSpan.classList.contains('input-currency')) {
+                                input.setAttribute('data-oti-type', 'number');
+                            }
+                        }
+                    });
+                }""")
+            except Exception as e:
+                print(f"Aviso: Falha na injeção de metadados (não crítico): {e}")
+
             # fallback (SPA / OutSystems)
             if "login" in page.url.lower():
                 print("Fallback: tentar navegação interna")
