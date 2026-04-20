@@ -185,11 +185,13 @@ def get_html(data: RequestData, _: None = Depends(verify_api_key)):
             soup = BeautifulSoup(html, "html.parser")
             body = soup.body
 
+            response_html = body.prettify() if body else soup.prettify()
+
             browser.close()
 
             return {
                 "status": "success",
-                "response": str(body) if body else ""
+                "response": response_html if body else ""
             }
 
     except Exception as e:
