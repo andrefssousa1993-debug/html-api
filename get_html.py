@@ -84,13 +84,14 @@ def get_html(data: RequestData, _: None = Depends(verify_api_key)):
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
+            page.route("**/*.{png,jpg,jpeg,gif,css,woff,woff2,svg,pdf}", lambda route: route.abort())
 
             # =========================
             # LOGIN
             # =========================
             if data.url_login and data.username and data.password:
 
-                page.goto(data.url_login)
+                page.goto(data.url_login, wait_until="domcontentloaded")
                 page.wait_for_load_state("networkidle")
                 page.wait_for_timeout(1500)
 
@@ -133,7 +134,7 @@ def get_html(data: RequestData, _: None = Depends(verify_api_key)):
             # =========================
             # TARGET
             # =========================
-            page.goto(data.url_target)
+            page.goto(data.url_target, wait_until="domcontentloaded")
             page.wait_for_load_state("networkidle")
             page.wait_for_timeout(2000)
 
