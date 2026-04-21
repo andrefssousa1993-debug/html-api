@@ -178,9 +178,17 @@ def get_html(data: RequestData, _: None = Depends(verify_api_key)):
             # RESULT
             # =========================
             html = page.content()
+            current_url = page.url.lower()
+            if "login" in current_url and "login" not in target_url_lower:
+                return {"status": "fail", "response": "Target requires login (Redirected)"}
 
-            if "login" in page.url.lower():
-                return {"status": "fail", "response": "Target requires login"}
+# Opcional: Verificar se existe um campo de password visível que não deveria estar lá
+            if page.locator("input[type='password']").is_visible() and "login" not in target_url_lower:
+                return {"status": "fail", "response": "Target requires login (Password field detected)"}
+            
+            error_keywords = ["not enough permissions", "invalid role", "access denied", "sem permissões", "acesso negado"]
+            if any(msg in html.lower() for msg in error_keywords):
+                return {"status": "fail", "response": "Insufficient permissions or missing role"}
 
             soup = BeautifulSoup(html, "html.parser")
             body = soup.body
