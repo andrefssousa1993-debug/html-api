@@ -79,7 +79,7 @@ def find_login_button(page):
 # -------------------------------
 @router.post("/get-html")
 def get_html(data: RequestData, _: None = Depends(verify_api_key)):
-
+    target_url_lower = data.url_target.lower()
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
