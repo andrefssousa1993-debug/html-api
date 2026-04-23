@@ -1,9 +1,11 @@
 from fastapi import APIRouter, Header, Depends, HTTPException
 from pydantic import BaseModel
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import os
+import re
+import time
 
 router = APIRouter()
 
@@ -32,45 +34,36 @@ class RequestData(BaseModel):
 # -------------------------------
 # FIND INPUT
 # -------------------------------
-def find_input(page):
-    selectors = [
-        'input[type="email"]',
-        'input[type="text"]',
-        'input[name*="user"]',
-        'input[name*="email"]',
-        'input[id*="user"]',
-        'input[id*="email"]',
-        'input[placeholder*="user"]',
-        'input[placeholder*="email"]'
-    ]
-
-    for sel in selectors:
-        locator = page.locator(sel).first
-        if locator.count() > 0 and locator.is_visible():
-            return locator
-
-    return None
+async def find_input(page):
+    combined_selector = (
+        'input[type="email"], input[type="text"], input[name*="user"], '
+        'input[name*="email"], input[id*="user"], input[id*="email"], '
+        'input[placeholder*="user"], input[placeholder*="email"]'
+    )
+    
+    locator = page.locator(combined_selector).first
+    try:
+        await locator.wait_for(state="visible", timeout=3000)
+        return locator
+    except:
+        return None
 
 # -------------------------------
 # FIND LOGIN BUTTON
 # -------------------------------
-def find_login_button(page):
-    possible_names = ["login", "log in", "entrar", "sign in", "submit"]
+async def find_login_button(page):
+    pattern = re.compile(r"login|log in|entrar|sign in|submit", re.IGNORECASE)
+    btn = page.get_by_role("button", name=pattern)
+    if await btn.count() > 0:
+        return btn.first
 
-    for name in possible_names:
-        btn = page.get_by_role("button", name=name, exact=False)
-        if btn.count() > 0:
-            return btn.first
+    text_btn = page.locator('button:has-text("log"), button:has-text("entrar"), button:has-text("sign")')
+    if await text_btn.count() > 0:
+        return text_btn.first
 
-    buttons = page.locator("button")
-    for i in range(buttons.count()):
-        text = buttons.nth(i).inner_text().lower()
-        if any(word in text for word in ["log", "entrar", "sign"]):
-            return buttons.nth(i)
-
-    submit = page.locator('input[type="submit"], button[type="submit"]').first
-    if submit.count() > 0:
-        return submit
+    submit = page.locator('input[type="submit"], button[type="submit"]')
+    if await submit.count() > 0:
+        return submit.first
 
     return None
 
@@ -78,54 +71,71 @@ def find_login_button(page):
 # MAIN
 # -------------------------------
 @router.post("/get-html")
-def get_html(data: RequestData, _: None = Depends(verify_api_key)):
+async def get_html(data: RequestData, _: None = Depends(verify_api_key)):
     target_url_lower = data.url_target.lower()
+    total_start = time.time()
+    
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+        async with async_playwright() as p:
+            print("\n--- INÍCIO DO REQUEST ---")
+            step_time = time.time()
+            browser = await p.chromium.launch(headless=True)
+            
+            # Injetar um User-Agent real
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            
+            # 🔥 REMOVIDO: O bloqueio de imagens foi desativado porque o OutSystems 
+            # encrava se não conseguir carregar certos assets visuais na página de login.
+            # await context.route("**/*", lambda route: route.continue_() if route.request.resource_type not in ["image", "font", "media"] else route.abort())
+            
+            page = await context.new_page()
+            print(f"[Cronómetro] Abrir Browser: {time.time() - step_time:.2f}s")
 
             # =========================
             # LOGIN
             # =========================
             if data.url_login and data.username and data.password:
+                step_time = time.time()
+                
+                try:
+                    await page.goto(data.url_login, wait_until="domcontentloaded", timeout=15000)
+                except Exception as e:
+                    print(f"Aviso: goto login excedeu tempo ou falhou. A tentar continuar... Erro: {e}")
+                print(f"[Cronómetro] Goto Login ({data.url_login}): {time.time() - step_time:.2f}s")
 
-                page.goto(data.url_login)
-                page.wait_for_load_state("networkidle")
-                page.wait_for_timeout(1500)
-
-                user_input = find_input(page)
+                user_input = await find_input(page)
                 pass_input = page.locator("input[type='password']").first
 
                 if not user_input:
                     return {"status": "fail", "response": "Username field not found"}
 
-                if pass_input.count() == 0:
+                if await pass_input.count() == 0:
                     return {"status": "fail", "response": "Password field not found"}
 
-                user_input.fill(data.username)
-                pass_input.fill(data.password)
+                # 🔥 SOLUÇÃO: Preenchimento forçado (ignora animações e overlays transparentes do OutSystems)
+                await user_input.fill(data.username, force=True)
+                await pass_input.fill(data.password, force=True)
 
-                login_btn = find_login_button(page)
+                login_btn = await find_login_button(page)
 
-                if login_btn:
-                    login_btn.click()
-                else:
-                    pass_input.press("Enter")
-
-                # 🔥 esperar redirect real
+                step_time = time.time()
                 try:
-                    page.wait_for_function(
-                        f"window.location.href !== '{data.url_login}'",
-                        timeout=7000
-                    )
+                    if login_btn:
+                        await login_btn.click(timeout=5000, force=True) # force=True aqui também por segurança
+                    else:
+                        await pass_input.press("Enter")
+                except Exception as e:
+                    print(f"Aviso: Falha ao clicar no botão de login: {e}")
+                print(f"[Cronómetro] Clicar Login: {time.time() - step_time:.2f}s")
+
+                step_time = time.time()
+                try:
+                    await page.wait_for_url(lambda url: url != data.url_login, timeout=5000)
                 except:
                     pass
-
-                page.wait_for_load_state("networkidle")
-                page.wait_for_timeout(2000)
-
-                print("URL depois do login:", page.url)
+                print(f"[Cronómetro] Esperar Redirect: {time.time() - step_time:.2f}s")
 
                 if "login" in page.url.lower():
                     return {"status": "fail", "response": "Login failed"}
@@ -133,23 +143,26 @@ def get_html(data: RequestData, _: None = Depends(verify_api_key)):
             # =========================
             # TARGET
             # =========================
-            page.goto(data.url_target)
-            page.wait_for_load_state("networkidle")
-            page.wait_for_timeout(2000)
-
-            print("URL depois do target:", page.url)
-
-            # --- INJEÇÃO DE METADADOS (Segura e sem quebras) ---
+            step_time = time.time()
             try:
-                page.evaluate("""() => {
+                await page.goto(data.url_target, wait_until="domcontentloaded", timeout=15000)
+            except Exception as e:
+                print(f"Aviso: goto target excedeu tempo ou falhou. Erro: {e}")
+            print(f"[Cronómetro] Goto Target ({data.url_target}): {time.time() - step_time:.2f}s")
+            
+            try:
+                await page.wait_for_load_state("networkidle", timeout=2000)
+            except:
+                pass
+
+            # --- INJEÇÃO DE METADADOS ---
+            try:
+                await page.evaluate("""() => {
                     document.querySelectorAll('input').forEach(input => {
-                        // 1. Detetar Máscaras (Inputmask.js / OutSystems)
                         if (input.inputmask && input.inputmask.opts) {
                             const mask = input.inputmask.opts.mask;
                             if (mask) input.setAttribute('data-oti-mask', mask.toString());
                         }
-
-                        // 2. Detetar tipos reais (Hierarchy Check)
                         const parentSpan = input.closest('span');
                         if (parentSpan) {
                             if (parentSpan.classList.contains('input-date')) {
@@ -161,29 +174,32 @@ def get_html(data: RequestData, _: None = Depends(verify_api_key)):
                     });
                 }""")
             except Exception as e:
-                print(f"Aviso: Falha na injeção de metadados (não crítico): {e}")
+                print(f"Aviso: Falha na injeção de metadados: {e}")
 
             # fallback (SPA / OutSystems)
             if "login" in page.url.lower():
                 print("Fallback: tentar navegação interna")
-
+                step_time = time.time()
                 try:
-                    page.get_by_role("link", name="Games").click()
-                    page.wait_for_load_state("networkidle")
-                    page.wait_for_timeout(1500)
-                except:
-                    pass
+                    game_link = page.get_by_role("link", name="Games")
+                    await game_link.click(timeout=3000, force=True)
+                    await page.wait_for_load_state("networkidle", timeout=2000)
+                except Exception as e:
+                    print(f"Aviso: Fallback link click falhou: {e}")
+                print(f"[Cronómetro] Fallback Link Click: {time.time() - step_time:.2f}s")
 
             # =========================
             # RESULT
             # =========================
-            html = page.content()
+            step_time = time.time()
+            html = await page.content()
             current_url = page.url.lower()
+            
             if "login" in current_url and "login" not in target_url_lower:
                 return {"status": "fail", "response": "Target requires login (Redirected)"}
 
-# Opcional: Verificar se existe um campo de password visível que não deveria estar lá
-            if page.locator("input[type='password']").is_visible() and "login" not in target_url_lower:
+            pass_visible = await page.locator("input[type='password']").is_visible()
+            if pass_visible and "login" not in target_url_lower:
                 return {"status": "fail", "response": "Target requires login (Password field detected)"}
             
             error_keywords = ["not enough permissions", "invalid role", "access denied", "sem permissões", "acesso negado"]
@@ -195,7 +211,9 @@ def get_html(data: RequestData, _: None = Depends(verify_api_key)):
 
             response_html = body.prettify() if body else soup.prettify()
 
-            browser.close()
+            await browser.close()
+            print(f"[Cronómetro] Parsing e Fecho do Browser: {time.time() - step_time:.2f}s")
+            print(f"--- FIM DO REQUEST (Tempo Total: {time.time() - total_start:.2f}s) ---\n")
 
             return {
                 "status": "success",
@@ -203,6 +221,7 @@ def get_html(data: RequestData, _: None = Depends(verify_api_key)):
             }
 
     except Exception as e:
+        print(f"ERRO CRÍTICO: {e}")
         return {
             "status": "fail",
             "response": str(e)
