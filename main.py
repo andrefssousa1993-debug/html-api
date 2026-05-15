@@ -1,10 +1,20 @@
 from fastapi import FastAPI, Form
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
+from contextlib import asynccontextmanager
 
-app = FastAPI()
+from get_html import router as html_router, start_browser, stop_browser
 
-from get_html import router as html_router
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await start_browser()
+    yield
+    await stop_browser()
+
+
+app = FastAPI(lifespan=lifespan)
+
 app.include_router(html_router)
 
 # -------------------------------
