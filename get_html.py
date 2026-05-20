@@ -215,17 +215,22 @@ async def perform_login(page, data: RequestData):
     except Exception:
         return {"ok": False, "reason": "Password field not found"}
 
-    # 🔥 SOLUÇÃO DEFINITIVA PARA O OUTSYSTEMS: Injeção via JS nativo (ignora overlays e timeouts)
+    # 🔥 FORÇA BRUTA MELHORADA: Clica primeiro para focar e injeta via JS nativo com blur (ativa o React)
     try:
         js_fill = """(el, val) => { 
+            el.focus();
             el.value = val; 
             el.dispatchEvent(new Event('input', { bubbles: true })); 
             el.dispatchEvent(new Event('change', { bubbles: true })); 
+            el.blur();
         }"""
+        await user_input.click(force=True)
         await user_input.evaluate(js_fill, data.username)
+        
+        await pass_input.click(force=True)
         await pass_input.evaluate(js_fill, data.password)
     except Exception as e:
-        # Fallback clássico caso a injeção falhe por algum motivo estrutural
+        # Fallback clássico caso a injeção nativa falhe por algum motivo estrutural
         await user_input.fill(data.username, force=True)
         await pass_input.fill(data.password, force=True)
 
