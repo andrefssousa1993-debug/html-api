@@ -206,8 +206,7 @@ async def perform_login(page, data: RequestData):
     pass_input = page.locator("input[type='password']").first
 
     if not user_input:
-        # Modo detetive automático se falhar no Render
-        print(f"🚨 FAIIL: URL atual: {page.url} | Título: {await page.title()}")
+        print(f"🚨 FAIL: URL atual: {page.url} | Título: {await page.title()}")
         return {"ok": False, "reason": "Username field not found"}
 
     try:
@@ -215,22 +214,15 @@ async def perform_login(page, data: RequestData):
     except Exception:
         return {"ok": False, "reason": "Password field not found"}
 
-    # 🔥 FORÇA BRUTA MELHORADA: Clica primeiro para focar e injeta via JS nativo com blur (ativa o React)
+    # Força Bruta Clássica misturada com emulação de teclado
     try:
-        js_fill = """(el, val) => { 
-            el.focus();
-            el.value = val; 
-            el.dispatchEvent(new Event('input', { bubbles: true })); 
-            el.dispatchEvent(new Event('change', { bubbles: true })); 
-            el.blur();
-        }"""
         await user_input.click(force=True)
-        await user_input.evaluate(js_fill, data.username)
+        await page.keyboard.type(data.username, delay=50)
         
         await pass_input.click(force=True)
-        await pass_input.evaluate(js_fill, data.password)
-    except Exception as e:
-        # Fallback clássico caso a injeção nativa falhe por algum motivo estrutural
+        await page.keyboard.type(data.password, delay=50)
+    except Exception:
+        # Fallback se falhar a escrita
         await user_input.fill(data.username, force=True)
         await pass_input.fill(data.password, force=True)
 
@@ -254,8 +246,17 @@ async def perform_login(page, data: RequestData):
     except Exception:
         pass
 
+    # 🕵️ MODO DETETIVE: Se continuar na página de login, captura o que correu mal
     if "login" in page.url.lower():
-        return {"ok": False, "reason": "Login failed"}
+        # Captura o texto visível no ecrã para ver o erro do OutSystems
+        texto_pagina = await page.get_by_role("document").inner_text() if await page.get_by_role("document").count() > 0 else await page.content()
+        print(f"🚨 LOGIN REJEITADO PELO SITE. URL: {page.url}")
+        
+        # Procura erros comuns no texto para te avisar no log
+        if "incorreto" in texto_pagina.lower() or "inválid" in texto_pagina.lower():
+            return {"ok": False, "reason": "Login failed: Credenciais rejeitadas pelo servidor (User/Pass inválidos)"}
+        
+        return {"ok": False, "reason": f"Login failed: O site recusou a submissao. Conteudo visivel: {texto_pagina[:500].strip()}"}
 
     return {"ok": True}
 
