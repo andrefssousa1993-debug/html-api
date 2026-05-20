@@ -4,6 +4,7 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import os
+import re
 import asyncio
 
 router = APIRouter()
@@ -18,8 +19,6 @@ _playwright = None
 _browser = None
 _startup_lock = asyncio.Lock()
 
-# Guarda sessões por login+user
-# Exemplo chave: "https://site/login|user@email.com"
 _session_cache = {}
 
 
@@ -38,7 +37,7 @@ async def start_browser():
             headless=True,
             args=[
                 "--no-sandbox",
-                "--disable-dev-shm-usage",
+                "--disable-dev-shm-usage",  # 🔥 CRÍTICO: Evita que o Render congele por falta de memória
                 "--disable-gpu",
                 "--disable-extensions",
                 "--disable-background-networking",
@@ -82,12 +81,7 @@ class RequestData(BaseModel):
     url_login: str | None = None
     username: str | None = None
     password: str | None = None
-
-    # Espera extra depois do load/render.
-    # Reduzido para acelerar. Se vier HTML vazio, envia render_wait_ms maior no payload.
     render_wait_ms: int | None = 500
-
-    # Forçar novo login, ignorando sessão guardada.
     force_login: bool | None = False
 
 
@@ -95,63 +89,30 @@ class RequestData(BaseModel):
 # FIND INPUT
 # -------------------------------
 async def find_input(page):
-    selectors = [
-        'input[type="email"]',
-        'input[type="text"]',
-        'input:not([type])',
-        'input[name*="user" i]',
-        'input[name*="email" i]',
-        'input[name*="login" i]',
-        'input[name*="username" i]',
-        'input[name*="utilizador" i]',
-        'input[id*="user" i]',
-        'input[id*="email" i]',
-        'input[id*="login" i]',
-        'input[id*="username" i]',
-        'input[id*="utilizador" i]',
-        'input[placeholder*="user" i]',
-        'input[placeholder*="email" i]',
-        'input[placeholder*="login" i]',
-        'input[placeholder*="username" i]',
-        'input[placeholder*="utilizador" i]',
-    ]
-
+    # Otimizado com seletor combinado nativo para ser instantâneo
+    combined_selector = (
+        'input[type="email"], input[type="text"], input[name*="user" i], '
+        'input[name*="email" i], input[id*="user" i], input[id*="email" i], '
+        'input[placeholder*="user" i], input[placeholder*="email" i]'
+    )
+    
     try:
-        await page.wait_for_selector("input", timeout=8000)
+        locator = page.locator(combined_selector).first
+        # Espera até 10 segundos para dar tempo ao Render de processar o JS do OutSystems
+        await locator.wait_for(state="visible", timeout=10000)
+        return locator
     except Exception:
-        pass
-
-    for sel in selectors:
-        locator = page.locator(sel).first
-
+        # Fallback seguro para o primeiro input editável caso mude o layout
         try:
-            if await locator.count() > 0 and await locator.is_visible(timeout=700):
-                return locator
+            inputs = page.locator("input")
+            for i in range(await inputs.count()):
+                inp = inputs.nth(i)
+                input_type = (await inp.get_attribute("type") or "text").lower()
+                if input_type not in ["password", "hidden", "submit", "button", "checkbox", "radio"]:
+                    if await inp.is_visible(timeout=500):
+                        return inp
         except Exception:
             pass
-
-    # Fallback: primeiro input visível que não seja password/hidden/submit/button
-    inputs = page.locator("input")
-
-    try:
-        count = await inputs.count()
-    except Exception:
-        count = 0
-
-    for i in range(count):
-        inp = inputs.nth(i)
-
-        try:
-            input_type = (await inp.get_attribute("type") or "text").lower()
-
-            if input_type in ["password", "hidden", "submit", "button", "checkbox", "radio"]:
-                continue
-
-            if await inp.is_visible(timeout=500):
-                return inp
-        except Exception:
-            pass
-
     return None
 
 
@@ -159,39 +120,24 @@ async def find_input(page):
 # FIND LOGIN BUTTON
 # -------------------------------
 async def find_login_button(page):
-    possible_names = ["login", "log in", "entrar", "sign in", "submit"]
-
-    for name in possible_names:
-        btn = page.get_by_role("button", name=name, exact=False)
-
-        try:
-            if await btn.count() > 0 and await btn.first.is_visible(timeout=500):
-                return btn.first
-        except Exception:
-            pass
-
-    buttons = page.locator("button")
+    try:
+        pattern = re.compile(r"login|log in|entrar|sign in|submit", re.IGNORECASE)
+        btn = page.get_by_role("button", name=pattern)
+        if await btn.count() > 0:
+            return btn.first
+    except Exception:
+        pass
 
     try:
-        count = await buttons.count()
+        text_btn = page.locator('button:has-text("log"), button:has-text("entrar"), button:has-text("sign")').first
+        if await text_btn.count() > 0:
+            return text_btn
     except Exception:
-        count = 0
-
-    for i in range(count):
-        button = buttons.nth(i)
-
-        try:
-            text = (await button.inner_text(timeout=500)).lower()
-
-            if any(word in text for word in ["log", "entrar", "sign", "submit"]):
-                return button
-        except Exception:
-            pass
+        pass
 
     submit = page.locator('input[type="submit"], button[type="submit"]').first
-
     try:
-        if await submit.count() > 0 and await submit.is_visible(timeout=500):
+        if await submit.count() > 0:
             return submit
     except Exception:
         pass
@@ -203,55 +149,43 @@ async def find_login_button(page):
 # RESOURCE BLOCKING
 # -------------------------------
 async def block_heavy_resources(route):
-    request = route.request
-
-    # Não bloquear script nem stylesheet.
-    # OutSystems/React precisa deles para renderizar o HTML real.
-    if request.resource_type in ["image", "media", "font"]:
-        await route.abort()
-    else:
-        await route.continue_()
+    try:
+        request = route.request
+        if request.resource_type in ["image", "media", "font"]:
+            await route.abort()
+        else:
+            await route.continue_()
+    except Exception:
+        pass
 
 
 # -------------------------------
 # PAGE WAIT HELPERS
 # -------------------------------
 async def goto_login_and_wait(page, url_login: str):
-    await page.goto(url_login, wait_until="load", timeout=20000)
-
+    await page.goto(url_login, wait_until="domcontentloaded", timeout=20000)
     try:
-        await page.wait_for_load_state("networkidle", timeout=5000)
+        await page.wait_for_load_state("networkidle", timeout=3000)
     except Exception:
         pass
-
-    await page.wait_for_timeout(500)
 
 
 async def goto_target_and_wait(page, url_target: str, render_wait_ms: int = 500):
-    await page.goto(url_target, wait_until="load", timeout=20000)
-
-    # Mais curto para não ficar preso em polling/requests de SPA.
+    await page.goto(url_target, wait_until="domcontentloaded", timeout=20000)
     try:
-        await page.wait_for_load_state("networkidle", timeout=4000)
+        await page.wait_for_load_state("networkidle", timeout=3000)
     except Exception:
         pass
 
-    # OutSystems/React: esperar o root deixar de estar vazio.
     try:
         await page.wait_for_function(
             """() => {
-                const root =
-                    document.querySelector('#reactContainer') ||
-                    document.querySelector('[data-reactroot]') ||
-                    document.querySelector('main') ||
-                    document.body;
-
+                const root = document.querySelector('#reactContainer') ||
+                             document.querySelector('[data-reactroot]') ||
+                             document.querySelector('main') ||
+                             document.body;
                 if (!root) return false;
-
-                const text = (root.innerText || '').trim();
-                const hasElements = root.querySelectorAll('*').length > 3;
-
-                return hasElements || text.length > 20;
+                return root.querySelectorAll('*').length > 3 || (root.innerText || '').trim().length > 20;
             }""",
             timeout=5000,
         )
@@ -272,40 +206,48 @@ async def perform_login(page, data: RequestData):
     pass_input = page.locator("input[type='password']").first
 
     if not user_input:
+        # Modo detetive automático se falhar no Render
+        print(f"🚨 FAIIL: URL atual: {page.url} | Título: {await page.title()}")
         return {"ok": False, "reason": "Username field not found"}
 
-    if await pass_input.count() == 0:
+    try:
+        await pass_input.wait_for(state="visible", timeout=5000)
+    except Exception:
         return {"ok": False, "reason": "Password field not found"}
 
-    await user_input.fill(data.username)
-    await pass_input.fill(data.password)
+    # 🔥 SOLUÇÃO DEFINITIVA PARA O OUTSYSTEMS: Injeção via JS nativo (ignora overlays e timeouts)
+    try:
+        js_fill = """(el, val) => { 
+            el.value = val; 
+            el.dispatchEvent(new Event('input', { bubbles: true })); 
+            el.dispatchEvent(new Event('change', { bubbles: true })); 
+        }"""
+        await user_input.evaluate(js_fill, data.username)
+        await pass_input.evaluate(js_fill, data.password)
+    except Exception as e:
+        # Fallback clássico caso a injeção falhe por algum motivo estrutural
+        await user_input.fill(data.username, force=True)
+        await pass_input.fill(data.password, force=True)
 
     login_btn = await find_login_button(page)
 
-    if login_btn:
-        await login_btn.click()
-    else:
+    try:
+        if login_btn:
+            await login_btn.click(timeout=5000, force=True)
+        else:
+            await pass_input.press("Enter")
+    except Exception:
         await pass_input.press("Enter")
 
-    # Esperar redirect real, mas sem bloquear demasiado.
     try:
-        await page.wait_for_url(
-            lambda url: str(url) != data.url_login,
-            timeout=8000,
-        )
-    except PlaywrightTimeoutError:
-        pass
+        await page.wait_for_url(lambda url: str(url) != data.url_login, timeout=6000)
     except Exception:
         pass
 
     try:
-        await page.wait_for_load_state("networkidle", timeout=5000)
+        await page.wait_for_load_state("networkidle", timeout=3000)
     except Exception:
         pass
-
-    await page.wait_for_timeout(800)
-
-    print("URL depois do login:", page.url)
 
     if "login" in page.url.lower():
         return {"ok": False, "reason": "Login failed"}
@@ -321,13 +263,10 @@ async def inject_metadata(page):
         await page.evaluate("""
             () => {
                 document.querySelectorAll('input').forEach(input => {
-                    // 1. Detetar máscaras Inputmask.js / OutSystems
                     if (input.inputmask && input.inputmask.opts) {
                         const mask = input.inputmask.opts.mask;
                         if (mask) input.setAttribute('data-oti-mask', mask.toString());
                     }
-
-                    // 2. Detetar tipos reais por classes de parent
                     const parentSpan = input.closest('span');
                     if (parentSpan) {
                         if (parentSpan.classList.contains('input-date')) {
@@ -357,7 +296,6 @@ async def get_html(data: RequestData, _: None = Depends(verify_api_key)):
         await start_browser()
 
     target_url_lower = data.url_target.lower()
-
     context = None
     page = None
 
@@ -367,13 +305,14 @@ async def get_html(data: RequestData, _: None = Depends(verify_api_key)):
 
         if data.url_login and data.username:
             session_key = f"{data.url_login}|{data.username}"
-
             if not data.force_login:
                 storage_state = _session_cache.get(session_key)
 
         context_kwargs = {
             "ignore_https_errors": True,
             "viewport": {"width": 1366, "height": 768},
+            # 🔥 CRÍTICO: Disfarça o browser no Render para a AWS do OutSystems não dar block
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
 
         if storage_state:
@@ -394,20 +333,15 @@ async def get_html(data: RequestData, _: None = Depends(verify_api_key)):
         # =========================
         if data.url_login and data.username and data.password:
             if has_cached_session and not data.force_login:
-                # Tenta target com sessão guardada
                 await goto_target_and_wait(page, data.url_target, render_wait)
-
-                password_count = await page.locator("input[type='password']").count()
-
-                needs_login = (
-                    "login" in page.url.lower()
-                    or password_count > 0
-                )
+                try:
+                    password_count = await page.locator("input[type='password']").count()
+                except Exception:
+                    password_count = 0
+                needs_login = ("login" in page.url.lower() or password_count > 0)
             else:
-                # Sem sessão: faz login primeiro, como no código antigo
                 needs_login = True
         else:
-            # Sem dados de login: abre target diretamente
             await goto_target_and_wait(page, data.url_target, render_wait)
             needs_login = False
 
@@ -423,29 +357,22 @@ async def get_html(data: RequestData, _: None = Depends(verify_api_key)):
                     "response": login_result["reason"],
                 }
 
-            # Guardar sessão depois de login bem-sucedido
             if session_key:
                 try:
                     _session_cache[session_key] = await context.storage_state()
                 except Exception as e:
                     print(f"Aviso: não foi possível guardar sessão: {e}")
 
-            # Ir ao target já autenticado
             await goto_target_and_wait(page, data.url_target, render_wait)
-
-        print("URL depois do target:", page.url)
 
         # =========================
         # INJEÇÃO DE METADADOS
         # =========================
         await inject_metadata(page)
 
-        # Fallback antigo SPA / OutSystems
         if "login" in page.url.lower():
-            print("Fallback: tentar navegação interna")
-
             try:
-                await page.get_by_role("link", name="Games").click(timeout=3000)
+                await page.get_by_role("link", name="Games").click(timeout=3000, force=True)
                 await goto_target_and_wait(page, data.url_target, render_wait)
             except Exception:
                 pass
@@ -465,7 +392,6 @@ async def get_html(data: RequestData, _: None = Depends(verify_api_key)):
 
         try:
             password_visible = await page.locator("input[type='password']").is_visible(timeout=500)
-
             if password_visible and "login" not in target_url_lower:
                 return {
                     "status": "fail",
@@ -475,14 +401,7 @@ async def get_html(data: RequestData, _: None = Depends(verify_api_key)):
         except Exception:
             pass
 
-        error_keywords = [
-            "not enough permissions",
-            "invalid role",
-            "access denied",
-            "sem permissões",
-            "acesso negado",
-        ]
-
+        error_keywords = ["not enough permissions", "invalid role", "access denied", "sem permissões", "acesso negado"]
         if any(msg in html.lower() for msg in error_keywords):
             return {
                 "status": "fail",
@@ -492,7 +411,6 @@ async def get_html(data: RequestData, _: None = Depends(verify_api_key)):
 
         soup = BeautifulSoup(html, "html.parser")
         body = soup.body
-
         response_html = body.prettify() if body else soup.prettify()
 
         return {
@@ -513,7 +431,6 @@ async def get_html(data: RequestData, _: None = Depends(verify_api_key)):
                 await page.close()
             except Exception:
                 pass
-
         if context:
             try:
                 await context.close()
